@@ -285,7 +285,11 @@ export default function VoiceTutor() {
       streamRef.current = null;
     }
     if (videoRef.current) {
-      videoRef.current.srcObject = null;
+      try {
+        videoRef.current.srcObject = null;
+      } catch (e) {
+        console.warn("Failed to clear video srcObject:", e);
+      }
     }
     setIsCameraActive(false);
     if (processorRef.current) {
@@ -293,7 +297,7 @@ export default function VoiceTutor() {
       processorRef.current = null;
     }
     setIsListening(false);
-    addLog("Microphone stopped");
+    addLog("Microphone and camera stopped");
   };
 
   const captureAndSendImage = async () => {
@@ -435,20 +439,20 @@ export default function VoiceTutor() {
         <div className="relative z-10">
           {/* Camera Preview */}
           <AnimatePresence>
-            {isConnected && isCameraActive && (
+            {isCameraActive && (
               <motion.div 
                 initial={{ opacity: 0, scale: 0.9 }}
                 animate={{ opacity: 1, scale: 1 }}
                 exit={{ opacity: 0, scale: 0.9 }}
-                className="mb-8 relative max-w-md mx-auto aspect-video rounded-3xl overflow-hidden border-4 border-indigo-600/20 shadow-2xl"
+                className="mb-8 relative max-w-md mx-auto aspect-video rounded-3xl overflow-hidden border-4 border-indigo-600/20 shadow-2xl bg-black"
               >
                 <video 
                   ref={(el) => {
                     videoRef.current = el;
                     if (el && streamRef.current && el.srcObject !== streamRef.current) {
-                      addLog("Callback Ref: Attaching stream to video");
+                      addLog("Attaching stream to video element...");
                       el.srcObject = streamRef.current;
-                      el.play().catch(err => console.error("Video play error in ref:", err));
+                      el.play().catch(err => addLog(`Video play error: ${err}`));
                     }
                   }}
                   autoPlay
@@ -456,9 +460,9 @@ export default function VoiceTutor() {
                   muted
                   onLoadedMetadata={(e) => {
                     const video = e.currentTarget;
-                    addLog(`Video metadata loaded: ${video.videoWidth}x${video.videoHeight}`);
-                    video.play().catch(err => addLog(`Video auto-play error: ${err}`));
+                    addLog(`Camera resolution: ${video.videoWidth}x${video.videoHeight}`);
                   }}
+                  onPlaying={() => addLog("Camera feed is live")}
                   className="w-full h-full object-cover"
                 />
                 <div className="absolute inset-0 pointer-events-none border-[20px] border-transparent">
