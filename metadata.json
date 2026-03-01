@@ -1,0 +1,7 @@
+{
+  "name": "CommuteOS",
+  "description": "Adaptive AI Podcast Generator for your daily commute. Turn travel time into learning time with personalized, grounded, and interactive audio lessons.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
