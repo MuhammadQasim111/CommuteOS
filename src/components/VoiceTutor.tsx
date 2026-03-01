@@ -175,8 +175,15 @@ export default function VoiceTutor() {
 
   const startMicrophone = async () => {
     try {
-      addLog("Requesting microphone access...");
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      addLog("Requesting microphone access with echo cancellation...");
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          sampleRate: 16000
+        } 
+      });
       streamRef.current = stream;
       
       const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
@@ -214,7 +221,17 @@ export default function VoiceTutor() {
       };
 
       source.connect(processor);
-      processor.connect(audioContext.destination);
+      // processor.connect(audioContext.destination); // DO NOT CONNECT TO DESTINATION - This causes feedback!
+      
+      // We need to connect the processor to something to keep it alive in some browsers, 
+      // but we can use a dummy node or just not connect it if it works.
+      // Actually, ScriptProcessorNode needs to be connected to destination to fire onaudioprocess in many browsers.
+      // To avoid hearing it, we can use a GainNode with 0 volume.
+      const silentGain = audioContext.createGain();
+      silentGain.gain.value = 0;
+      processor.connect(silentGain);
+      silentGain.connect(audioContext.destination);
+      
       setIsListening(true);
       addLog("Microphone active and streaming");
     } catch (err) {
@@ -271,15 +288,19 @@ export default function VoiceTutor() {
     
     const source = ctx.createBufferSource();
     source.buffer = buffer;
-    source.connect(ctx.destination);
+    
+    // Add a gain node to help with potential clipping or volume issues
+    const gainNode = ctx.createGain();
+    gainNode.gain.value = 1.0;
+    source.connect(gainNode);
+    gainNode.connect(ctx.destination);
     
     const now = ctx.currentTime;
-    if (nextPlayTimeRef.current < now) {
-      nextPlayTimeRef.current = now + 0.05;
-    }
+    // Gapless scheduling: use the larger of 'now' or 'nextPlayTime'
+    const startTime = Math.max(now, nextPlayTimeRef.current);
     
-    source.start(nextPlayTimeRef.current);
-    nextPlayTimeRef.current += buffer.duration;
+    source.start(startTime);
+    nextPlayTimeRef.current = startTime + buffer.duration;
     
     source.onended = () => {
       playNextInQueue();
