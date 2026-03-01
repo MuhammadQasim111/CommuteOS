@@ -51,9 +51,12 @@ export default function VoiceTutor() {
     setError(null);
     isConnectedRef.current = false;
     setMessages([]);
-    addLog("Connecting to Gemini Live API...");
+    addLog("Initializing session and hardware...");
 
     try {
+      // Start microphone and camera first to ensure permissions are granted
+      await startMicrophone();
+      
       const apiKey = process.env.GEMINI_API_KEY || (window as any).process?.env?.GEMINI_API_KEY;
       if (!apiKey || apiKey === "MY_GEMINI_API_KEY") {
         throw new Error("API Key not found or invalid. Please set GEMINI_API_KEY in the Secrets panel.");
@@ -78,9 +81,11 @@ export default function VoiceTutor() {
             setIsConnected(true);
             isConnectedRef.current = true;
             setIsConnecting(false);
-            startMicrophone();
           },
           onmessage: async (message: LiveServerMessage) => {
+            // Log full message for debugging
+            console.log("[VoiceTutor] Raw Message:", message);
+            
             // 1. Handle Audio Output
             if (message.serverContent?.modelTurn?.parts) {
               for (const part of message.serverContent.modelTurn.parts) {
@@ -179,28 +184,42 @@ export default function VoiceTutor() {
 
   const startMicrophone = async () => {
     try {
-      addLog("Requesting microphone and camera access...");
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-        video: {
-          facingMode: 'environment',
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
-        }
-      });
-      streamRef.current = stream;
-      
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        setIsCameraActive(true);
+      // Stop any existing stream first
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
       }
       
+      addLog("Requesting microphone and camera access...");
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ 
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+          video: {
+            facingMode: 'environment',
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          }
+        });
+      } catch (err) {
+        addLog("Environment camera failed, trying default camera...");
+        stream = await navigator.mediaDevices.getUserMedia({ 
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+          video: true
+        });
+      }
+      streamRef.current = stream;
+      setIsCameraActive(stream.getVideoTracks().length > 0);
+      
       if (!audioContextRef.current) {
-        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
       }
       const audioContext = audioContextRef.current;
       
@@ -233,9 +252,13 @@ export default function VoiceTutor() {
         if (sessionPromiseRef.current) {
           sessionPromiseRef.current.then(session => {
             if (isConnectedRef.current) {
-              session.sendRealtimeInput({
-                media: { data: base64Data, mimeType: 'audio/pcm;rate=16000' }
-              });
+              try {
+                session.sendRealtimeInput({
+                  media: { data: base64Data, mimeType: 'audio/pcm;rate=16000' }
+                });
+              } catch (err) {
+                console.error("Error sending audio:", err);
+              }
             }
           });
         }
@@ -274,13 +297,23 @@ export default function VoiceTutor() {
   };
 
   const captureAndSendImage = async () => {
-    if (!videoRef.current || !canvasRef.current || !isConnectedRef.current) return;
+    if (!videoRef.current || !canvasRef.current || !isConnectedRef.current) {
+      addLog("Cannot capture: Video, Canvas, or Connection not ready.");
+      return;
+    }
     
     setIsCapturing(true);
     addLog("Capturing frame for analysis...");
     
     const video = videoRef.current;
     const canvas = canvasRef.current;
+    
+    if (video.videoWidth === 0 || video.videoHeight === 0) {
+      addLog("Video dimensions are 0. Waiting for video to load...");
+      setIsCapturing(false);
+      return;
+    }
+
     const context = canvas.getContext('2d');
     
     if (context) {
@@ -289,18 +322,28 @@ export default function VoiceTutor() {
       context.drawImage(video, 0, 0, canvas.width, canvas.height);
       
       // Convert to base64 jpeg
-      const base64Image = canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
       const fullImageUrl = canvas.toDataURL('image/jpeg', 0.8);
+      const base64Image = fullImageUrl.split(',')[1];
       
       // Add to messages immediately
       setMessages(prev => [...prev, { role: 'user', text: "[Photo Sent for Analysis]", image: fullImageUrl }]);
       
       if (sessionPromiseRef.current) {
-        const session = await sessionPromiseRef.current;
-        session.sendRealtimeInput({
-          media: { data: base64Image, mimeType: 'image/jpeg' }
-        });
-        addLog("Image sent to Gemini");
+        try {
+          const session = await sessionPromiseRef.current;
+          
+          if (!session || typeof session.sendRealtimeInput !== 'function') {
+            throw new Error("Live session not properly initialized or sendRealtimeInput missing");
+          }
+
+          session.sendRealtimeInput({
+            media: { data: base64Image, mimeType: 'image/jpeg' }
+          });
+          addLog("Image sent successfully to Gemini. Awaiting analysis...");
+        } catch (err) {
+          addLog(`Error sending image: ${err}`);
+          setError(`Vision Error: ${err instanceof Error ? err.message : String(err)}`);
+        }
       }
     }
     
@@ -400,10 +443,22 @@ export default function VoiceTutor() {
                 className="mb-8 relative max-w-md mx-auto aspect-video rounded-3xl overflow-hidden border-4 border-indigo-600/20 shadow-2xl"
               >
                 <video 
-                  ref={videoRef}
+                  ref={(el) => {
+                    videoRef.current = el;
+                    if (el && streamRef.current && el.srcObject !== streamRef.current) {
+                      addLog("Callback Ref: Attaching stream to video");
+                      el.srcObject = streamRef.current;
+                      el.play().catch(err => console.error("Video play error in ref:", err));
+                    }
+                  }}
                   autoPlay
                   playsInline
                   muted
+                  onLoadedMetadata={(e) => {
+                    const video = e.currentTarget;
+                    addLog(`Video metadata loaded: ${video.videoWidth}x${video.videoHeight}`);
+                    video.play().catch(err => addLog(`Video auto-play error: ${err}`));
+                  }}
                   className="w-full h-full object-cover"
                 />
                 <div className="absolute inset-0 pointer-events-none border-[20px] border-transparent">
