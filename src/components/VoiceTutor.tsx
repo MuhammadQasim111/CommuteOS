@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Mic, MicOff, Volume2, VolumeX, Loader2, BrainCircuit, X, MessageSquare, Terminal } from 'lucide-react';
+import { Mic, MicOff, Volume2, VolumeX, Loader2, BrainCircuit, X, MessageSquare, Terminal, Camera, Scan, Sparkles } from 'lucide-react';
 import { GoogleGenAI, Modality, LiveServerMessage } from "@google/genai";
 
 type Message = {
   role: 'user' | 'model';
   text: string;
+  image?: string;
 };
 
 export default function VoiceTutor() {
@@ -17,10 +18,13 @@ export default function VoiceTutor() {
   const [error, setError] = useState<string | null>(null);
   const [debugLogs, setDebugLogs] = useState<string[]>([]);
   const [showDebug, setShowDebug] = useState(false);
+  const [isCameraActive, setIsCameraActive] = useState(false);
+  const [isCapturing, setIsCapturing] = useState(false);
   
-  const recordingContextRef = useRef<AudioContext | null>(null);
-  const playbackContextRef = useRef<AudioContext | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const sessionPromiseRef = useRef<Promise<any> | null>(null);
   const audioQueueRef = useRef<Int16Array[]>([]);
@@ -64,7 +68,7 @@ export default function VoiceTutor() {
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: "Zephyr" } },
           },
-          systemInstruction: "You are a supersonic AI tutor. You are engaging, fast-paced, and brilliant. You explain complex topics simply and interactively. Keep your responses concise and conversational, as if we are on a phone call. Focus on being helpful and educational.",
+          systemInstruction: "You are a supersonic AI tutor with vision capabilities. You are engaging, fast-paced, and brilliant. You explain complex topics simply and interactively. When a user takes a photo, instantly identify what's in it (historical buildings, machines, plants, book pages, etc.) and give a quick, deep-dive explanation. Keep your responses concise and conversational, as if we are on a phone call. Focus on being helpful and educational. You bridge the gap between the physical world and digital learning.",
           outputAudioTranscription: {},
           inputAudioTranscription: {},
         },
@@ -175,19 +179,30 @@ export default function VoiceTutor() {
 
   const startMicrophone = async () => {
     try {
-      addLog("Requesting microphone access with echo cancellation...");
+      addLog("Requesting microphone and camera access...");
       const stream = await navigator.mediaDevices.getUserMedia({ 
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
-          sampleRate: 16000
-        } 
+        },
+        video: {
+          facingMode: 'environment',
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        }
       });
       streamRef.current = stream;
       
-      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-      recordingContextRef.current = audioContext;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        setIsCameraActive(true);
+      }
+      
+      if (!audioContextRef.current) {
+        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+      }
+      const audioContext = audioContextRef.current;
       
       if (audioContext.state === 'suspended') {
         await audioContext.resume();
@@ -207,7 +222,13 @@ export default function VoiceTutor() {
         }
         
         // Convert to base64 efficiently
-        const base64Data = btoa(String.fromCharCode.apply(null, new Uint8Array(pcmData.buffer) as any));
+        const uint8Array = new Uint8Array(pcmData.buffer);
+        let binary = '';
+        const chunkSize = 8192;
+        for (let i = 0; i < uint8Array.length; i += chunkSize) {
+          binary += String.fromCharCode.apply(null, uint8Array.subarray(i, i + chunkSize) as any);
+        }
+        const base64Data = btoa(binary);
 
         if (sessionPromiseRef.current) {
           sessionPromiseRef.current.then(session => {
@@ -221,12 +242,7 @@ export default function VoiceTutor() {
       };
 
       source.connect(processor);
-      // processor.connect(audioContext.destination); // DO NOT CONNECT TO DESTINATION - This causes feedback!
       
-      // We need to connect the processor to something to keep it alive in some browsers, 
-      // but we can use a dummy node or just not connect it if it works.
-      // Actually, ScriptProcessorNode needs to be connected to destination to fire onaudioprocess in many browsers.
-      // To avoid hearing it, we can use a GainNode with 0 volume.
       const silentGain = audioContext.createGain();
       silentGain.gain.value = 0;
       processor.connect(silentGain);
@@ -245,20 +261,50 @@ export default function VoiceTutor() {
       streamRef.current.getTracks().forEach(track => track.stop());
       streamRef.current = null;
     }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+    setIsCameraActive(false);
     if (processorRef.current) {
       processorRef.current.disconnect();
       processorRef.current = null;
     }
-    if (recordingContextRef.current) {
-      recordingContextRef.current.close();
-      recordingContextRef.current = null;
-    }
-    if (playbackContextRef.current) {
-      playbackContextRef.current.close();
-      playbackContextRef.current = null;
-    }
     setIsListening(false);
     addLog("Microphone stopped");
+  };
+
+  const captureAndSendImage = async () => {
+    if (!videoRef.current || !canvasRef.current || !isConnectedRef.current) return;
+    
+    setIsCapturing(true);
+    addLog("Capturing frame for analysis...");
+    
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    const context = canvas.getContext('2d');
+    
+    if (context) {
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      
+      // Convert to base64 jpeg
+      const base64Image = canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
+      const fullImageUrl = canvas.toDataURL('image/jpeg', 0.8);
+      
+      // Add to messages immediately
+      setMessages(prev => [...prev, { role: 'user', text: "[Photo Sent for Analysis]", image: fullImageUrl }]);
+      
+      if (sessionPromiseRef.current) {
+        const session = await sessionPromiseRef.current;
+        session.sendRealtimeInput({
+          media: { data: base64Image, mimeType: 'image/jpeg' }
+        });
+        addLog("Image sent to Gemini");
+      }
+    }
+    
+    setTimeout(() => setIsCapturing(false), 500);
   };
 
   const playNextInQueue = async () => {
@@ -267,44 +313,59 @@ export default function VoiceTutor() {
       return;
     }
 
-    if (!playbackContextRef.current) {
-      playbackContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+    if (!audioContextRef.current) {
+      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
     }
 
-    const ctx = playbackContextRef.current;
+    const ctx = audioContextRef.current;
     if (ctx.state === 'suspended') {
       await ctx.resume();
     }
 
     isPlayingRef.current = true;
-    const pcmData = audioQueueRef.current.shift()!;
     
-    const buffer = ctx.createBuffer(1, pcmData.length, 24000);
-    const channelData = buffer.getChannelData(0);
-    
-    for (let i = 0; i < pcmData.length; i++) {
-      channelData[i] = pcmData[i] / 32768.0;
+    // Process all available chunks in the queue to ensure gapless playback
+    while (audioQueueRef.current.length > 0) {
+      const pcmData = audioQueueRef.current.shift()!;
+      
+      // Gemini sends 24kHz audio
+      const buffer = ctx.createBuffer(1, pcmData.length, 24000);
+      const channelData = buffer.getChannelData(0);
+      
+      for (let i = 0; i < pcmData.length; i++) {
+        channelData[i] = pcmData[i] / 32768.0;
+      }
+      
+      const source = ctx.createBufferSource();
+      source.buffer = buffer;
+      
+      // Use a dynamics compressor to prevent clipping and "vibration" artifacts
+      const compressor = ctx.createDynamicsCompressor();
+      compressor.threshold.setValueAtTime(-24, ctx.currentTime);
+      compressor.knee.setValueAtTime(30, ctx.currentTime);
+      compressor.ratio.setValueAtTime(12, ctx.currentTime);
+      compressor.attack.setValueAtTime(0.003, ctx.currentTime);
+      compressor.release.setValueAtTime(0.25, ctx.currentTime);
+      
+      source.connect(compressor);
+      compressor.connect(ctx.destination);
+      
+      const now = ctx.currentTime;
+      // Gapless scheduling: use the larger of 'now' or 'nextPlayTime'
+      // Add a tiny lookahead (5ms) to prevent underruns
+      const startTime = Math.max(now + 0.005, nextPlayTimeRef.current);
+      
+      source.start(startTime);
+      nextPlayTimeRef.current = startTime + buffer.duration;
+      
+      source.onended = () => {
+        if (audioQueueRef.current.length > 0) {
+          playNextInQueue();
+        } else if (ctx.currentTime >= nextPlayTimeRef.current) {
+          isPlayingRef.current = false;
+        }
+      };
     }
-    
-    const source = ctx.createBufferSource();
-    source.buffer = buffer;
-    
-    // Add a gain node to help with potential clipping or volume issues
-    const gainNode = ctx.createGain();
-    gainNode.gain.value = 1.0;
-    source.connect(gainNode);
-    gainNode.connect(ctx.destination);
-    
-    const now = ctx.currentTime;
-    // Gapless scheduling: use the larger of 'now' or 'nextPlayTime'
-    const startTime = Math.max(now, nextPlayTimeRef.current);
-    
-    source.start(startTime);
-    nextPlayTimeRef.current = startTime + buffer.duration;
-    
-    source.onended = () => {
-      playNextInQueue();
-    };
   };
 
   useEffect(() => {
@@ -329,6 +390,43 @@ export default function VoiceTutor() {
         </AnimatePresence>
 
         <div className="relative z-10">
+          {/* Camera Preview */}
+          <AnimatePresence>
+            {isConnected && isCameraActive && (
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.9 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.9 }}
+                className="mb-8 relative max-w-md mx-auto aspect-video rounded-3xl overflow-hidden border-4 border-indigo-600/20 shadow-2xl"
+              >
+                <video 
+                  ref={videoRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  className="w-full h-full object-cover"
+                />
+                <div className="absolute inset-0 pointer-events-none border-[20px] border-transparent">
+                  <div className="w-full h-full border border-white/30 rounded-xl" />
+                </div>
+                {isCapturing && (
+                  <motion.div 
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    className="absolute inset-0 bg-white flex items-center justify-center"
+                  >
+                    <Sparkles className="text-indigo-600 animate-pulse" size={48} />
+                  </motion.div>
+                )}
+                <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-2 bg-black/50 backdrop-blur-md px-3 py-1.5 rounded-full text-[10px] text-white font-bold uppercase tracking-widest">
+                  <Scan size={12} />
+                  <span>Vision Active</span>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
           <div className="w-24 h-24 bg-indigo-600 rounded-full mx-auto flex items-center justify-center text-white mb-6 shadow-2xl shadow-indigo-200">
             {isConnecting ? (
               <Loader2 className="animate-spin" size={40} />
@@ -366,28 +464,47 @@ export default function VoiceTutor() {
                 {isConnecting ? "Connecting..." : "Start Live Session"}
               </button>
             ) : (
-              <div className="flex gap-4">
-                <button
-                  onClick={toggleMute}
-                  className={`p-4 rounded-2xl font-bold text-lg shadow-lg transition-all flex items-center gap-3 ${
-                    isMuted 
-                      ? 'bg-red-100 text-red-600 shadow-red-50 hover:bg-red-200' 
-                      : 'bg-indigo-100 text-indigo-600 shadow-indigo-50 hover:bg-indigo-200'
-                  }`}
-                  title={isMuted ? "Unmute Microphone" : "Mute Microphone"}
-                >
-                  {isMuted ? <MicOff size={24} /> : <Mic size={24} />}
-                </button>
-                <button
-                  onClick={disconnect}
-                  className="px-8 py-4 bg-red-500 text-white rounded-2xl font-bold text-lg shadow-lg shadow-red-100 hover:bg-red-600 transition-all flex items-center gap-3"
-                >
-                  <X size={24} />
-                  End Session
-                </button>
+              <div className="flex flex-col items-center gap-6">
+                <div className="flex gap-4">
+                  <button
+                    onClick={toggleMute}
+                    className={`p-4 rounded-2xl font-bold text-lg shadow-lg transition-all flex items-center gap-3 ${
+                      isMuted 
+                        ? 'bg-red-100 text-red-600 shadow-red-50 hover:bg-red-200' 
+                        : 'bg-indigo-100 text-indigo-600 shadow-indigo-50 hover:bg-indigo-200'
+                    }`}
+                    title={isMuted ? "Unmute Microphone" : "Mute Microphone"}
+                  >
+                    {isMuted ? <MicOff size={24} /> : <Mic size={24} />}
+                  </button>
+                  
+                  <button
+                    onClick={captureAndSendImage}
+                    disabled={isCapturing}
+                    className="px-8 py-4 bg-emerald-500 text-white rounded-2xl font-bold text-lg shadow-lg shadow-emerald-100 hover:bg-emerald-600 transition-all flex items-center gap-3"
+                  >
+                    {isCapturing ? <Loader2 className="animate-spin" /> : <Camera size={24} />}
+                    Snap & Learn
+                  </button>
+
+                  <button
+                    onClick={disconnect}
+                    className="px-8 py-4 bg-red-500 text-white rounded-2xl font-bold text-lg shadow-lg shadow-red-100 hover:bg-red-600 transition-all flex items-center gap-3"
+                  >
+                    <X size={24} />
+                    End Session
+                  </button>
+                </div>
+                
+                <p className="text-xs text-gray-400 font-medium flex items-center gap-2">
+                  <Sparkles size={14} className="text-indigo-400" />
+                  Point your camera at anything and click "Snap & Learn" for a deep dive
+                </p>
               </div>
             )}
           </div>
+
+          <canvas ref={canvasRef} className="hidden" />
 
           <button 
             onClick={() => setShowDebug(!showDebug)}
@@ -470,6 +587,14 @@ export default function VoiceTutor() {
                       ? 'bg-indigo-600 text-white rounded-tr-none shadow-md shadow-indigo-100' 
                       : 'bg-gray-100 text-gray-800 rounded-tl-none border border-gray-200'
                   }`}>
+                    {msg.image && (
+                      <img 
+                        src={msg.image} 
+                        alt="Captured" 
+                        className="w-full h-auto rounded-xl mb-2 border border-white/20"
+                        referrerPolicy="no-referrer"
+                      />
+                    )}
                     {msg.text}
                   </div>
                 </div>
