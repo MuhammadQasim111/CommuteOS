@@ -14,8 +14,11 @@ import {
   Loader2,
   ArrowLeft,
   Trophy,
-  Download
+  Download,
+  Mic,
+  MessageSquare
 } from 'lucide-react';
+import VoiceTutor from './components/VoiceTutor';
 
 type Section = {
   heading: string;
@@ -133,6 +136,12 @@ export default function App() {
             active={activeTab === 'paths'} 
             onClick={() => { setActiveTab('paths'); setSelectedPodcast(null); }} 
           />
+          <NavItem 
+            icon={<Mic size={20} />} 
+            label="Voice Tutor" 
+            active={activeTab === 'voice'} 
+            onClick={() => { setActiveTab('voice'); setSelectedPodcast(null); }} 
+          />
         </nav>
 
         <div className="p-4 mt-auto">
@@ -175,6 +184,7 @@ export default function App() {
                   />
                 )}
                 {activeTab === 'library' && <LibraryView podcasts={podcasts} onView={viewPodcast} />}
+                {activeTab === 'voice' && <VoiceTutor />}
               </motion.div>
             )}
           </AnimatePresence>
