@@ -4,69 +4,122 @@ import path from "path";
 import { fileURLToPath } from "url";
 import fs from "fs";
 import Database from "better-sqlite3";
+import { Pool } from "pg";
+import { put } from "@vercel/blob";
 import { GoogleGenAI, Modality, Type } from "@google/genai";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const db = new Database("commuteos.db");
+// Database Abstraction
+const isPostgres = !!process.env.DATABASE_URL;
+let pgPool: Pool | null = null;
+let sqliteDb: any = null;
 
-// Ensure audio directory exists
+if (isPostgres) {
+  pgPool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: { rejectUnauthorized: false }
+  });
+} else {
+  sqliteDb = new Database("commuteos.db");
+}
+
+const db = {
+  async exec(sql: string) {
+    if (isPostgres) {
+      await pgPool!.query(sql);
+    } else {
+      sqliteDb.exec(sql);
+    }
+  },
+  async query(sql: string, params: any[] = []) {
+    if (isPostgres) {
+      const res = await pgPool!.query(sql, params);
+      return res.rows;
+    } else {
+      return sqliteDb.prepare(sql).all(...params);
+    }
+  },
+  async get(sql: string, params: any[] = []) {
+    if (isPostgres) {
+      const res = await pgPool!.query(sql, params);
+      return res.rows[0];
+    } else {
+      return sqliteDb.prepare(sql).get(...params);
+    }
+  },
+  async run(sql: string, params: any[] = []) {
+    if (isPostgres) {
+      await pgPool!.query(sql, params);
+    } else {
+      sqliteDb.prepare(sql).run(...params);
+    }
+  }
+};
+
+// Ensure audio directory exists for local fallback
 const audioDir = path.join(__dirname, "public", "audio");
 if (!fs.existsSync(audioDir)) {
   fs.mkdirSync(audioDir, { recursive: true });
 }
 
 // Initialize Database
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    email TEXT UNIQUE,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
+async function initDb() {
+  const schema = `
+    CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY,
+      email TEXT UNIQUE,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
 
-  CREATE TABLE IF NOT EXISTS podcasts (
-    id TEXT PRIMARY KEY,
-    user_id INTEGER,
-    topic TEXT,
-    level TEXT,
-    mode TEXT,
-    duration INTEGER,
-    title TEXT,
-    summary TEXT,
-    audio_url TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(user_id) REFERENCES users(id)
-  );
+    CREATE TABLE IF NOT EXISTS podcasts (
+      id TEXT PRIMARY KEY,
+      user_id INTEGER,
+      topic TEXT,
+      level TEXT,
+      mode TEXT,
+      duration INTEGER,
+      title TEXT,
+      summary TEXT,
+      audio_url TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
 
-  CREATE TABLE IF NOT EXISTS sections (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    podcast_id TEXT,
-    heading TEXT,
-    content TEXT,
-    duration_minutes INTEGER,
-    FOREIGN KEY(podcast_id) REFERENCES podcasts(id)
-  );
+    CREATE TABLE IF NOT EXISTS sections (
+      id SERIAL PRIMARY KEY,
+      podcast_id TEXT,
+      heading TEXT,
+      content TEXT,
+      duration_minutes INTEGER
+    );
 
-  CREATE TABLE IF NOT EXISTS quizzes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    podcast_id TEXT,
-    question TEXT,
-    options TEXT, -- JSON array
-    correct_answer INTEGER,
-    FOREIGN KEY(podcast_id) REFERENCES podcasts(id)
-  );
+    CREATE TABLE IF NOT EXISTS quizzes (
+      id SERIAL PRIMARY KEY,
+      podcast_id TEXT,
+      question TEXT,
+      options TEXT,
+      correct_answer INTEGER
+    );
 
-  CREATE TABLE IF NOT EXISTS history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    podcast_id TEXT,
-    completed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    score INTEGER,
-    FOREIGN KEY(user_id) REFERENCES users(id),
-    FOREIGN KEY(podcast_id) REFERENCES podcasts(id)
-  );
-`);
+    CREATE TABLE IF NOT EXISTS history (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER,
+      podcast_id TEXT,
+      completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      score INTEGER
+    );
+  `;
+  
+  // Adjust schema for SQLite if needed (SQLite uses AUTOINCREMENT and different types)
+  const sqliteSchema = schema
+    .replace(/SERIAL PRIMARY KEY/g, "INTEGER PRIMARY KEY AUTOINCREMENT")
+    .replace(/TIMESTAMP DEFAULT CURRENT_TIMESTAMP/g, "DATETIME DEFAULT CURRENT_TIMESTAMP");
+
+  await db.exec(isPostgres ? schema : sqliteSchema);
+}
+
+initDb().catch(console.error);
 
 function parseJsonResponse(text: string) {
   try {
@@ -88,19 +141,27 @@ async function startServer() {
   // API Routes
   app.use("/audio", express.static(path.join(__dirname, "public", "audio")));
 
-  app.get("/api/podcasts", (req, res) => {
-    const podcasts = db.prepare("SELECT * FROM podcasts ORDER BY created_at DESC").all();
-    res.json(podcasts);
+  app.get("/api/podcasts", async (req, res) => {
+    try {
+      const podcasts = await db.query("SELECT * FROM podcasts ORDER BY created_at DESC");
+      res.json(podcasts);
+    } catch (err) {
+      res.status(500).json({ error: "Failed to fetch podcasts" });
+    }
   });
 
-  app.get("/api/podcasts/:id", (req, res) => {
-    const podcast = db.prepare("SELECT * FROM podcasts WHERE id = ?").get(req.params.id);
-    if (!podcast) return res.status(404).json({ error: "Podcast not found" });
-    
-    const sections = db.prepare("SELECT * FROM sections WHERE podcast_id = ?").all(req.params.id);
-    const quiz = db.prepare("SELECT * FROM quizzes WHERE podcast_id = ?").all(req.params.id);
-    
-    res.json({ ...podcast, sections, quiz: quiz.map(q => ({ ...q, options: JSON.parse(q.options as string) })) });
+  app.get("/api/podcasts/:id", async (req, res) => {
+    try {
+      const podcast = await db.get("SELECT * FROM podcasts WHERE id = ?", [req.params.id]);
+      if (!podcast) return res.status(404).json({ error: "Podcast not found" });
+      
+      const sections = await db.query("SELECT * FROM sections WHERE podcast_id = ?", [req.params.id]);
+      const quiz = await db.query("SELECT * FROM quizzes WHERE podcast_id = ?", [req.params.id]);
+      
+      res.json({ ...podcast, sections, quiz: quiz.map(q => ({ ...q, options: JSON.parse(q.options as string) })) });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to fetch podcast details" });
+    }
   });
 
   app.post("/api/generate", async (req, res) => {
@@ -214,12 +275,21 @@ async function startServer() {
         if (audioChunks.length > 0) {
           const finalBuffer = Buffer.concat(audioChunks);
           const fileName = `${podcastId}.mp3`;
-          const filePath = path.join(audioDir, fileName);
-          fs.writeFileSync(filePath, finalBuffer);
-          
-          // Use APP_URL if available, otherwise relative path
-          const baseUrl = process.env.APP_URL || "";
-          audioUrl = `${baseUrl}/audio/${fileName}`;
+
+          if (process.env.BLOB_READ_WRITE_TOKEN) {
+            console.log("[Generate] Uploading to Vercel Blob...");
+            const blob = await put(`audio/${fileName}`, finalBuffer, {
+              access: 'public',
+              contentType: 'audio/mpeg',
+            });
+            audioUrl = blob.url;
+          } else {
+            console.log("[Generate] Saving to local storage...");
+            const filePath = path.join(audioDir, fileName);
+            fs.writeFileSync(filePath, finalBuffer);
+            const baseUrl = process.env.APP_URL || "";
+            audioUrl = `${baseUrl}/audio/${fileName}`;
+          }
           console.log("[Generate] Full audio generated and stored at:", audioUrl);
         }
       } catch (err) {
@@ -228,12 +298,12 @@ async function startServer() {
 
       // Save to DB
       console.log("[Generate] Saving to database...");
-      db.prepare("INSERT INTO podcasts (id, topic, level, mode, duration, title, summary, audio_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-        .run(podcastId, topic, level, mode, duration, outline.title, `A ${duration}-minute ${level} session on ${topic}.`, audioUrl);
+      await db.run("INSERT INTO podcasts (id, topic, level, mode, duration, title, summary, audio_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", 
+        [podcastId, topic, level, mode, duration, outline.title, `A ${duration}-minute ${level} session on ${topic}.`, audioUrl]);
 
       for (const s of generatedSections) {
-        db.prepare("INSERT INTO sections (podcast_id, heading, content, duration_minutes) VALUES (?, ?, ?, ?)")
-          .run(podcastId, s.heading, s.content, s.duration_minutes);
+        await db.run("INSERT INTO sections (podcast_id, heading, content, duration_minutes) VALUES (?, ?, ?, ?)", 
+          [podcastId, s.heading, s.content, s.duration_minutes]);
       }
 
       // Quiz Generation
@@ -260,8 +330,8 @@ async function startServer() {
 
         const quizItems = parseJsonResponse(quizResponse.text);
         for (const q of quizItems) {
-          db.prepare("INSERT INTO quizzes (podcast_id, question, options, correct_answer) VALUES (?, ?, ?, ?)")
-            .run(podcastId, q.question, JSON.stringify(q.options), q.correct_answer);
+          await db.run("INSERT INTO quizzes (podcast_id, question, options, correct_answer) VALUES (?, ?, ?, ?)", 
+            [podcastId, q.question, JSON.stringify(q.options), q.correct_answer]);
         }
         console.log("[Generate] Quiz generated.");
       } catch (err) {

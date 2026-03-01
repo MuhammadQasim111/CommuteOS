@@ -79,9 +79,13 @@ export default function App() {
       } else {
         alert(data.error || 'Failed to generate podcast. Please try again.');
       }
-    } catch (err) {
-      console.error(err);
-      alert('A network error occurred. Please check your connection.');
+    } catch (err: any) {
+      console.error('Generation error:', err);
+      if (err.name === 'AbortError') {
+        alert('The request timed out. Podcast generation can take a minute or more.');
+      } else {
+        alert(`Connection error: ${err.message || 'The server might be timing out or unavailable. If you are on Vercel, this is likely due to the 10s serverless function limit.'}`);
+      }
     } finally {
       setIsGenerating(false);
     }
