@@ -46,16 +46,9 @@ type Podcast = {
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
-  const [isGenerating, setIsGenerating] = useState(false);
   const [podcasts, setPodcasts] = useState<Podcast[]>([]);
   const [selectedPodcast, setSelectedPodcast] = useState<Podcast | null>(null);
   
-  // Form State
-  const [topic, setTopic] = useState('');
-  const [duration, setDuration] = useState(15);
-  const [level, setLevel] = useState('Intermediate');
-  const [mode, setMode] = useState('Professor');
-
   useEffect(() => {
     fetchPodcasts();
   }, []);
@@ -64,34 +57,6 @@ export default function App() {
     const res = await fetch('/api/podcasts');
     const data = await res.json();
     setPodcasts(data);
-  };
-
-  const handleGenerate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsGenerating(true);
-    try {
-      const res = await fetch('/api/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ topic, duration, level, mode }),
-      });
-      const data = await res.json();
-      if (res.ok && data.id) {
-        await fetchPodcasts();
-        setActiveTab('library');
-      } else {
-        alert(data.error || 'Failed to generate podcast. Please try again.');
-      }
-    } catch (err: any) {
-      console.error('Generation error:', err);
-      if (err.name === 'AbortError') {
-        alert('The request timed out. Podcast generation can take a minute or more.');
-      } else {
-        alert(`Connection error: ${err.message || 'The server might be timing out or unavailable. If you are on Vercel, this is likely due to the 10s serverless function limit.'}`);
-      }
-    } finally {
-      setIsGenerating(false);
-    }
   };
 
   const viewPodcast = async (id: string) => {
@@ -117,12 +82,6 @@ export default function App() {
             label="Dashboard" 
             active={activeTab === 'dashboard'} 
             onClick={() => { setActiveTab('dashboard'); setSelectedPodcast(null); }} 
-          />
-          <NavItem 
-            icon={<PlusCircle size={20} />} 
-            label="Generate" 
-            active={activeTab === 'generate'} 
-            onClick={() => { setActiveTab('generate'); setSelectedPodcast(null); }} 
           />
           <NavItem 
             icon={<Library size={20} />} 
@@ -173,16 +132,6 @@ export default function App() {
                 transition={{ duration: 0.2 }}
               >
                 {activeTab === 'dashboard' && <Dashboard podcasts={podcasts} onView={viewPodcast} />}
-                {activeTab === 'generate' && (
-                  <GenerateForm 
-                    topic={topic} setTopic={setTopic}
-                    duration={duration} setDuration={setDuration}
-                    level={level} setLevel={setLevel}
-                    mode={mode} setMode={setMode}
-                    onSubmit={handleGenerate}
-                    isGenerating={isGenerating}
-                  />
-                )}
                 {activeTab === 'library' && <LibraryView podcasts={podcasts} onView={viewPodcast} />}
                 {activeTab === 'voice' && <VoiceTutor />}
               </motion.div>
@@ -269,96 +218,6 @@ function PodcastCard({ podcast, onClick }: { podcast: Podcast, onClick: () => vo
           <span className="px-2 py-0.5 bg-gray-100 rounded text-[10px] uppercase font-bold tracking-wider">{podcast.level}</span>
         </div>
       </div>
-    </div>
-  );
-}
-
-function GenerateForm({ 
-  topic, setTopic, 
-  duration, setDuration, 
-  level, setLevel, 
-  mode, setMode, 
-  onSubmit, 
-  isGenerating 
-}: any) {
-  return (
-    <div className="max-w-2xl mx-auto bg-white p-10 rounded-[40px] border border-gray-100 shadow-xl">
-      <div className="mb-8">
-        <h3 className="text-2xl font-bold mb-2">Create New Session</h3>
-        <p className="text-gray-500">Customize your AI-generated learning experience.</p>
-      </div>
-
-      <form onSubmit={onSubmit} className="space-y-6">
-        <div>
-          <label className="block text-sm font-semibold mb-2">Topic</label>
-          <input 
-            type="text" 
-            value={topic}
-            onChange={(e) => setTopic(e.target.value)}
-            placeholder="e.g. Quantum Computing, Roman History, React Hooks..."
-            className="w-full px-5 py-4 bg-gray-50 border-none rounded-2xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
-            required
-          />
-        </div>
-
-        <div className="grid grid-cols-2 gap-6">
-          <div>
-            <label className="block text-sm font-semibold mb-2">Commute Duration (min)</label>
-            <input 
-              type="number" 
-              value={duration}
-              onChange={(e) => setDuration(parseInt(e.target.value))}
-              className="w-full px-5 py-4 bg-gray-50 border-none rounded-2xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-semibold mb-2">Skill Level</label>
-            <select 
-              value={level}
-              onChange={(e) => setLevel(e.target.value)}
-              className="w-full px-5 py-4 bg-gray-50 border-none rounded-2xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
-            >
-              <option>Beginner</option>
-              <option>Intermediate</option>
-              <option>Expert</option>
-            </select>
-          </div>
-        </div>
-
-        <div>
-          <label className="block text-sm font-semibold mb-2">Learning Mode</label>
-          <div className="grid grid-cols-2 gap-3">
-            {['Professor', 'Debate', 'Storytelling', 'Socratic'].map(m => (
-              <button
-                key={m}
-                type="button"
-                onClick={() => setMode(m)}
-                className={`px-4 py-3 rounded-xl border-2 transition-all ${
-                  mode === m 
-                    ? 'border-indigo-600 bg-indigo-50 text-indigo-600 font-medium' 
-                    : 'border-gray-100 text-gray-500 hover:border-gray-200'
-                }`}
-              >
-                {m}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <button 
-          disabled={isGenerating}
-          className="w-full py-5 bg-indigo-600 text-white rounded-2xl font-bold text-lg shadow-lg shadow-indigo-200 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-3 transition-all"
-        >
-          {isGenerating ? (
-            <>
-              <Loader2 className="animate-spin" />
-              Generating your podcast...
-            </>
-          ) : (
-            'Generate Podcast'
-          )}
-        </button>
-      </form>
     </div>
   );
 }

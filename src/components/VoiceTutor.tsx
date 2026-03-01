@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Mic, MicOff, Volume2, VolumeX, Loader2, BrainCircuit, X, MessageSquare } from 'lucide-react';
+import { Mic, MicOff, Volume2, VolumeX, Loader2, BrainCircuit, X, MessageSquare, Terminal } from 'lucide-react';
 import { GoogleGenAI, Modality, LiveServerMessage } from "@google/genai";
 
 type Message = {
@@ -15,47 +15,69 @@ export default function VoiceTutor() {
   const [isMuted, setIsMuted] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [debugLogs, setDebugLogs] = useState<string[]>([]);
+  const [showDebug, setShowDebug] = useState(false);
   
   const recordingContextRef = useRef<AudioContext | null>(null);
   const playbackContextRef = useRef<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
-  const sessionRef = useRef<any>(null);
+  const sessionPromiseRef = useRef<Promise<any> | null>(null);
   const audioQueueRef = useRef<Int16Array[]>([]);
   const isPlayingRef = useRef(false);
+  const isConnectedRef = useRef(false);
+  const isMutedRef = useRef(false);
+  const nextPlayTimeRef = useRef(0);
+
+  const addLog = (msg: string) => {
+    const timestamp = new Date().toLocaleTimeString();
+    console.log(`[VoiceTutor] ${timestamp} - ${msg}`);
+    setDebugLogs(prev => [`[${timestamp}] ${msg}`, ...prev].slice(0, 50));
+  };
 
   const toggleMute = () => {
-    setIsMuted(!isMuted);
+    const newMuted = !isMuted;
+    setIsMuted(newMuted);
+    isMutedRef.current = newMuted;
+    addLog(newMuted ? "Microphone muted" : "Microphone unmuted");
   };
 
   const connect = async () => {
     setIsConnecting(true);
     setError(null);
+    isConnectedRef.current = false;
+    setMessages([]);
+    addLog("Connecting to Gemini Live API...");
+
     try {
       const apiKey = process.env.GEMINI_API_KEY || (window as any).process?.env?.GEMINI_API_KEY;
-      if (!apiKey) throw new Error("API Key not found. Please set GEMINI_API_KEY.");
+      if (!apiKey || apiKey === "MY_GEMINI_API_KEY") {
+        throw new Error("API Key not found or invalid. Please set GEMINI_API_KEY in the Secrets panel.");
+      }
 
       const ai = new GoogleGenAI({ apiKey });
       
-      const session = await ai.live.connect({
+      const sessionPromise = ai.live.connect({
         model: "gemini-2.5-flash-native-audio-preview-09-2025",
         config: {
           responseModalities: [Modality.AUDIO],
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: "Zephyr" } },
           },
-          systemInstruction: "You are a supersonic AI tutor. You are engaging, fast-paced, and brilliant. You explain complex topics simply and interactively. Keep your responses concise and conversational, as if we are on a phone call.",
+          systemInstruction: "You are a supersonic AI tutor. You are engaging, fast-paced, and brilliant. You explain complex topics simply and interactively. Keep your responses concise and conversational, as if we are on a phone call. Focus on being helpful and educational.",
           outputAudioTranscription: {},
           inputAudioTranscription: {},
         },
         callbacks: {
           onopen: () => {
+            addLog("Connection opened successfully");
             setIsConnected(true);
+            isConnectedRef.current = true;
             setIsConnecting(false);
             startMicrophone();
           },
           onmessage: async (message: LiveServerMessage) => {
-            // Handle audio output
+            // 1. Handle Audio Output
             if (message.serverContent?.modelTurn?.parts) {
               for (const part of message.serverContent.modelTurn.parts) {
                 if (part.inlineData?.data) {
@@ -74,85 +96,102 @@ export default function VoiceTutor() {
               }
             }
 
-            // Handle model transcription
-            if (message.serverContent?.modelTurn?.parts) {
-              const text = message.serverContent.modelTurn.parts.map(p => p.text).filter(Boolean).join("");
-              if (text) {
-                setMessages(prev => {
-                  const last = prev[prev.length - 1];
-                  if (last?.role === 'model') {
-                    const newMessages = [...prev];
-                    newMessages[newMessages.length - 1] = { role: 'model', text: last.text + text };
-                    return newMessages;
-                  }
-                  return [...prev, { role: 'model', text }];
-                });
-              }
+            // 2. Handle Model Transcription (Output)
+            const modelText = (message as any).outputTranscription?.text || 
+                             message.serverContent?.modelTurn?.parts?.map(p => p.text).filter(Boolean).join("");
+            
+            if (modelText) {
+              addLog(`Model: ${modelText}`);
+              setMessages(prev => {
+                const last = prev[prev.length - 1];
+                if (last?.role === 'model') {
+                  const newMessages = [...prev];
+                  newMessages[newMessages.length - 1] = { role: 'model', text: last.text + modelText };
+                  return newMessages;
+                }
+                return [...prev, { role: 'model', text: modelText }];
+              });
             }
 
-            // Handle user transcription
-            if (message.serverContent?.inputTranscription) {
-              const text = message.serverContent.inputTranscription.text;
-              if (text) {
-                setMessages(prev => {
-                  const last = prev[prev.length - 1];
-                  if (last?.role === 'user') {
-                    const newMessages = [...prev];
-                    newMessages[newMessages.length - 1] = { role: 'user', text: last.text + text };
-                    return newMessages;
-                  }
-                  return [...prev, { role: 'user', text }];
-                });
-              }
+            // 3. Handle User Transcription (Input)
+            const userText = (message as any).inputTranscription?.text || 
+                             (message as any).inputAudioTranscription?.text ||
+                             (message as any).serverContent?.inputTranscription?.text;
+            
+            if (userText) {
+              addLog(`User: ${userText}`);
+              setMessages(prev => {
+                const last = prev[prev.length - 1];
+                if (last?.role === 'user') {
+                  const newMessages = [...prev];
+                  newMessages[newMessages.length - 1] = { role: 'user', text: last.text + userText };
+                  return newMessages;
+                }
+                return [...prev, { role: 'user', text: userText }];
+              });
             }
 
             if (message.serverContent?.interrupted) {
+              addLog("Model interrupted");
               audioQueueRef.current = [];
               isPlayingRef.current = false;
             }
           },
           onclose: () => {
+            addLog("Connection closed");
             setIsConnected(false);
+            isConnectedRef.current = false;
             stopMicrophone();
           },
           onerror: (err) => {
-            console.error("Live API Error:", err);
-            setError("Connection error. Please try again.");
+            addLog(`Error: ${JSON.stringify(err)}`);
+            setError("Connection error. Please check your API key and network.");
             setIsConnecting(false);
+            isConnectedRef.current = false;
           }
         }
       });
 
-      sessionRef.current = session;
+      sessionPromiseRef.current = sessionPromise;
+      await sessionPromise;
     } catch (err: any) {
+      addLog(`Fatal Error: ${err.message}`);
       setError(err.message || "Failed to connect to Voice Tutor.");
       setIsConnecting(false);
+      isConnectedRef.current = false;
     }
   };
 
   const disconnect = () => {
-    if (sessionRef.current) {
-      sessionRef.current.close();
-      sessionRef.current = null;
+    addLog("Disconnecting...");
+    if (sessionPromiseRef.current) {
+      sessionPromiseRef.current.then(session => session.close());
+      sessionPromiseRef.current = null;
     }
     stopMicrophone();
     setIsConnected(false);
+    isConnectedRef.current = false;
   };
 
   const startMicrophone = async () => {
     try {
+      addLog("Requesting microphone access...");
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
       
       const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
       recordingContextRef.current = audioContext;
       
+      if (audioContext.state === 'suspended') {
+        await audioContext.resume();
+      }
+      
       const source = audioContext.createMediaStreamSource(stream);
       const processor = audioContext.createScriptProcessor(4096, 1, 1);
       processorRef.current = processor;
 
       processor.onaudioprocess = (e) => {
-        if (!isConnected || !sessionRef.current || isMuted) return;
+        if (!isConnectedRef.current || isMutedRef.current) return;
         
         const inputData = e.inputBuffer.getChannelData(0);
         const pcmData = new Int16Array(inputData.length);
@@ -160,18 +199,27 @@ export default function VoiceTutor() {
           pcmData[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
         }
         
-        const base64Data = btoa(String.fromCharCode(...new Uint8Array(pcmData.buffer)));
-        sessionRef.current.sendRealtimeInput({
-          media: { data: base64Data, mimeType: 'audio/pcm;rate=16000' }
-        });
+        // Convert to base64 efficiently
+        const base64Data = btoa(String.fromCharCode.apply(null, new Uint8Array(pcmData.buffer) as any));
+
+        if (sessionPromiseRef.current) {
+          sessionPromiseRef.current.then(session => {
+            if (isConnectedRef.current) {
+              session.sendRealtimeInput({
+                media: { data: base64Data, mimeType: 'audio/pcm;rate=16000' }
+              });
+            }
+          });
+        }
       };
 
       source.connect(processor);
       processor.connect(audioContext.destination);
       setIsListening(true);
+      addLog("Microphone active and streaming");
     } catch (err) {
-      console.error("Microphone error:", err);
-      setError("Could not access microphone.");
+      addLog(`Microphone Error: ${err}`);
+      setError("Could not access microphone. Please check permissions.");
     }
   };
 
@@ -193,9 +241,8 @@ export default function VoiceTutor() {
       playbackContextRef.current = null;
     }
     setIsListening(false);
+    addLog("Microphone stopped");
   };
-
-  const nextPlayTimeRef = useRef(0);
 
   const playNextInQueue = async () => {
     if (audioQueueRef.current.length === 0) {
@@ -228,7 +275,7 @@ export default function VoiceTutor() {
     
     const now = ctx.currentTime;
     if (nextPlayTimeRef.current < now) {
-      nextPlayTimeRef.current = now + 0.05; // Small buffer for scheduling
+      nextPlayTimeRef.current = now + 0.05;
     }
     
     source.start(nextPlayTimeRef.current);
@@ -320,6 +367,14 @@ export default function VoiceTutor() {
               </div>
             )}
           </div>
+
+          <button 
+            onClick={() => setShowDebug(!showDebug)}
+            className="mt-6 text-xs text-gray-400 hover:text-indigo-600 flex items-center gap-1 mx-auto"
+          >
+            <Terminal size={12} />
+            {showDebug ? "Hide Debug Console" : "Show Debug Console"}
+          </button>
         </div>
 
         {/* Visualizer */}
@@ -337,6 +392,31 @@ export default function VoiceTutor() {
         )}
       </div>
 
+      {/* Debug Console */}
+      <AnimatePresence>
+        {showDebug && (
+          <motion.div 
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            className="bg-gray-900 rounded-3xl p-6 overflow-hidden"
+          >
+            <div className="flex items-center gap-2 text-indigo-400 mb-4 text-xs font-mono uppercase tracking-widest">
+              <Terminal size={14} />
+              <span>Debug Console</span>
+            </div>
+            <div className="h-40 overflow-y-auto font-mono text-[10px] text-gray-400 space-y-1">
+              {debugLogs.map((log, i) => (
+                <div key={i} className="border-l border-gray-800 pl-2 py-0.5">
+                  <span className="text-gray-600 mr-2">[{new Date().toLocaleTimeString()}]</span>
+                  {log}
+                </div>
+              ))}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Transcript/Messages */}
       <div className="bg-white rounded-[32px] border border-gray-100 shadow-sm overflow-hidden">
         <div className="p-6 border-b border-gray-50 bg-gray-50/50 flex items-center justify-between">
@@ -351,7 +431,8 @@ export default function VoiceTutor() {
             </span>
           )}
         </div>
-        <div className="p-6 h-[300px] overflow-y-auto space-y-4 flex flex-col-reverse">
+        <div className="p-6 h-[300px] overflow-y-auto space-y-4 flex flex-col">
+          <div className="flex-1" />
           <div className="space-y-4">
             {messages.length === 0 ? (
               <div className="text-center py-12 text-gray-400 italic">
@@ -365,8 +446,8 @@ export default function VoiceTutor() {
                 >
                   <div className={`max-w-[80%] p-4 rounded-2xl text-sm ${
                     msg.role === 'user' 
-                      ? 'bg-indigo-600 text-white rounded-tr-none' 
-                      : 'bg-gray-100 text-gray-800 rounded-tl-none'
+                      ? 'bg-indigo-600 text-white rounded-tr-none shadow-md shadow-indigo-100' 
+                      : 'bg-gray-100 text-gray-800 rounded-tl-none border border-gray-200'
                   }`}>
                     {msg.text}
                   </div>
